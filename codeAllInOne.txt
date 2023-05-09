@@ -1,0 +1,811 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy import stats
+import seaborn as sns
+from scipy.stats import norm, skew
+from sklearn.preprocessing import LabelEncoder
+from matplotlib.pyplot import figure
+import scipy.ndimage as sp
+
+import math
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import OneClassSVM
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from sklearn.model_selection import cross_val_score
+
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neural_network import MLPClassifier
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+
+csv = pd.read_csv('/Users/dillu/Downloads/2020-2022 Event Data Set (2).csv')  
+csv1 = pd.read_csv('/Users/dillu/Downloads/2019 Event Data.csv')  
+
+csv2 = csv1.rename({'Team.A.id': 'TeamAId', 'Team.A.Name': 'TeamAName', 'Team.B.ID': 'TeamBId', 'Team.B.Name': 'TeamBName', 'Club.Id': 'ClubId', 'Club.Name': 'ClubName', 'Opposition.Id': 'OppositionId', 'Player.Id': 'PlayerId'}, axis=1)
+csv2 = csv2.rename({'InPossessionClub.Id': 'InPossessionClubId', 'InPossession.Player.Id': 'InPossessionPlayerId', 'Unnamed: 0': 'Half_20_ElapsedSecs', 'X0_20_ElapsedSecs': '0_20_ElapsedSecs'}, axis=1)        
+csv2 = csv2.rename({'X20_Half_ElapsedSecs': '20_Half_ElapsedSecs', 'X20_Try_ElapsedSecs': '20_Try_ElapsedSecs'}, axis=1)
+
+csv2 = csv2.drop(columns = 'Half_20_ElapsedSecs')
+
+#drop columns in csv2 that arent in csv
+csv2 = csv2.drop([col for col in csv2.columns if col not in csv.columns and col in csv.columns], axis=1)
+
+#drop columns in csv that arent in csv2
+csv = csv.drop([col for col in csv.columns if col not in csv2.columns and col in csv.columns], axis=1)
+
+#Ordering csv2 columns same as csv
+csv2 = csv2[csv.columns]
+
+csv_merged = pd.concat([csv, csv2])
+
+csv_merged = csv_merged.sort_values(by=['MatchId', 'SeqNumber'])
+
+#outliers
+
+plt.boxplot(csv_merged['Set']) 
+plt.title("Set BoxPlot")
+plt.xlabel('Sets')
+
+csv_merged.boxplot(column=['SeqNumber'])
+plt.title("SeqNumber BoxPlot")
+
+csv_merged.boxplot(column=['VenueId'])
+plt.title("VenueId BoxPlot")
+#looks like there is outliers but this is an id covariate and thus outliers are not a thing with this......
+
+csv_merged.boxplot(column=['PlayerId'])
+#same as venueId
+
+csv_merged.boxplot(column=['Half'])
+plt.title("Half BoxPlot")
+#after looking into halves, we find that when there is extra time the halfs count goes beyond 2 -> add code to how we know this 
+
+value = csv['EventCode'].value_counts()
+value
+rucks = csv_merged[(csv_merged['EventCode'] == 'RINS') | (csv_merged['EventCode'] == 'PABD')]
+value = rucks['EventCode'].value_counts()
+value
+
+
+csv_merged.boxplot(column=['XmPhysical'])
+plt.title("XmPhysical BoxPlot")
+#first though how could there be negative position, but realised through using above query that we start the 0 m position at the goaline
+#, so from the goalline to the deadball line is upto -10 metres and on the other side of the field it goes from 100 to 110
+
+
+#officals 
+csv_merged.boxplot(column=['OfficialId'])
+plt.title("Officials BoxPlot")
+
+
+csv_merged.boxplot(column=['PossessionSecs'])
+
+csv_merged.boxplot(column=['WeatherConditionId'])
+plt.title("WeatherCondition BoxPlot")
+csv_merged['WeatherConditionId'].unique()
+#wet = csv_merged[csv_merged['WeatherConditionId'] == 1040]
+#1040 is a outlier and thus is removed..............
+csv_merged = csv_merged[csv_merged['WeatherConditionId'] != 1040]
+
+#skewness 
+csv_merged.skew(axis = 0, skipna = True)
+
+#target variable
+#team a wins
+csv_dropping = csv_merged.copy()
+csv_dropping['TeamAWins'] = 0
+csv_dropping['TeamAWins'].loc[csv_dropping['TeamAScore'] > csv_dropping['TeamBScore']] = 1
+target = csv_dropping[['MatchId', 'TeamAWins']]
+target = target.groupby(['MatchId']).max()
+#what about draws
+
+#target variable..........
+target.boxplot(column=['TeamAWins'])
+plt.title("Target Variable BoxPlot")
+
+temp = csv_dropping.isnull().sum()
+temp2 = pd.DataFrame(temp, columns = ['Count'])
+temp2 = temp2.reset_index()
+
+data = temp2[temp2['Count'] > 0]
+
+# create figure
+fig = plt.figure()
+ax = fig.add_axes([0,0,1,1])
+# set Y axis label
+ax.set_ylabel('count')
+# set orientation for X axis labels
+plt.xticks(rotation='vertical')
+
+ax.bar(data['index'], data['Count'])
+plt.show()
+
+
+#missing data
+pd.set_option('display.max_rows', None)
+csv_dropping.isnull().sum()* 100 / len(csv_dropping)
+
+#can get rid of set 0 since no one has possession of ball then 
+csv_dropping = csv_dropping[csv_dropping['Set'] != 0]
+
+csv_dropping['DurationSecs']=csv_dropping['DurationSecs'].fillna(0)
+csv_dropping['Score']=csv_dropping['Score'].fillna(0)
+csv_dropping['OppScore']=csv_dropping['OppScore'].fillna(0)
+csv_dropping['PossessionSecs']=csv_dropping['PossessionSecs'].fillna(0)
+csv_dropping['OppPossessionSecs']=csv_dropping['OppPossessionSecs'].fillna(0)
+csv_dropping['TotalPossessionSecs']=csv_dropping['TotalPossessionSecs'].fillna(0)
+
+#remove small number of rows where we dont know what player has ball
+csv_dropping = csv_dropping[csv_dropping['InPossessionPlayerId'].isnull() == False]
+
+#search for dups, remove if any found
+csv_dropping[csv_dropping.duplicated(subset=['MatchId', 'SeqNumber', 'SeasonId']) == True]
+
+csv_dropping.isnull().sum()* 100 / len(csv_dropping)
+
+#play the ball duration average
+#PBFS	PTB - fast
+#PBNS	PTB - neutral
+#PBSS	PTB - slow
+ruckDur = csv_dropping[(csv_dropping['EventCode'] == "PBFS") | (csv_dropping['EventCode'] == "PBNS") | (csv_dropping['EventCode'] == "PBSS")]
+ruckDur = ruckDur[['MatchId', 'DurationSecs']]
+duration = ruckDur.groupby(['MatchId']).mean()
+duration.head()
+
+#HALFTIME POSSESSION SECS
+test_HT = csv_dropping[['MatchId', 'Half', 'SeqNumber', 'TeamAId', 'TeamBId', 'InPossessionClubId', 'PossessionSecs', 'OppPossessionSecs']]
+print(test_HT.isnull().sum())
+test_HT = test_HT[test_HT['Half'] == 1]
+test_HT = test_HT[test_HT['PossessionSecs'] != 0]
+test_HT = test_HT[~test_HT['PossessionSecs'].isnull()]
+#match = [19111015, 21111016]
+#test_HT = test_HT[test_HT['MatchId'].isin(match)]
+#test_HT = test_HT[test_HT['MatchId'] == 20111016]
+test_HT['teamA_secs_half'] = 0
+test_HT['teamB_secs_half'] = 0
+test_HT.reset_index(drop=True, inplace=True)
+idx = test_HT.groupby(['MatchId'])['SeqNumber'].transform(max) == test_HT['SeqNumber']
+test_HT = test_HT.loc[test_HT.groupby(['MatchId'])['SeqNumber'].idxmax()]
+for i, row in test_HT.iterrows():
+    if row["InPossessionClubId"] == row["TeamAId"]:
+       test_HT.at[i, "teamA_secs_half"] = row['PossessionSecs']
+       test_HT.at[i, "teamB_secs_half"] = row['OppPossessionSecs']
+    elif row["InPossessionClubId"] == row["TeamBId"]:
+        test_HT.at[i, "teamB_secs_half"] = row['PossessionSecs']
+        test_HT.at[i, "teamA_secs_half"] = row['OppPossessionSecs']
+test_HT.reset_index(drop=True, inplace=True)
+#print(test_HT[['MatchId', 'SeqNumber', 'TeamAId', 'teamA', 'TeamBId', 'teamB']])
+test_HT = test_HT[['MatchId', 'TeamAId', 'TeamBId', 'teamA_secs_half', 'teamB_secs_half']]
+pd.set_option('display.max_rows', 284)
+print(test_HT)
+
+#HALFTIME DIST AVG 201....
+poss1_HT = csv_dropping[['MatchId', 'Half', 'TeamAId', 'TeamBId', 'SeqNumber', 'EventCode', 'EventName', 'InPossessionClubId', 'XmPossession']]
+matches1 = [20111016,20111023,20111026,20111041,20111044,20111047,20111051,20111053,20111058,20111063,20111076,20111093,20111095,20111096,20111097,20111098,20111101,20111102,20111105,20111106,20111107,20111108,20111111,20111112,20111113,20111115,20111117,20111121,20111124,20111132,20111144,20111152,20111153,20111158,20111161,20111165,20111171,20111172,20111173,20111176,20111178,20111185,20111186,20111188,20111191,20111192,20111197,20111198,20111202,20111203,20111207,20111211,20111212,20111214,20111232,20111241,21111016,21111023,21111026,21111044,21111047,21111051,21111053,21111058,21111063,21111076,21111093,21111095,21111096,21111097,21111098,21111101,21111102,21111105,21111106,21111107,21111108,21111111,21111112,21111113,21111115,21111117,21111121,21111124,21111132,21111148,21111156,21111157,21111164,21111165,21111171,21111181,21111182,21111183,21111186,21111188,21111195,21111196,21111198,21111201,21111202,21111207,21111208,21111212,21111213,21111217,21111221,21111222,21111224,21111228,21111231,21111233,21111234,21111237,21111238,21111241,21111243,21111248,21111255,21111261,21111263,21111282,22111016,22111023,22111026,22111044,22111047,22111051,22111053,22111058,22111063,22111076,22111093,22111095,22111096,22111097,22111098,22111101,22111102,22111105,22111106,22111107,22111108,22111111,22111112,22111113,22111115,22111117,22111121,22111124,22111132,22111148,22111156,22111157,22111164,22111165,22111171,22111181,22111182,22111183,22111186,22111188,22111195,22111196,22111198,22111201,22111202,22111207,22111208,22111212,22111213,22111217,22111221,22111222,22111224,22111228,22111231,22111233,22111234,22111237,22111238,22111241,22111243,22111248,22111255]
+poss1_HT = poss1_HT[poss1_HT['MatchId'].isin(matches1)]
+poss1_HT = poss1_HT[~poss1_HT['InPossessionClubId'].isnull()]
+poss1_HT = poss1_HT[poss1_HT['Half'] == 1]
+
+poss1_HT['P'] = None
+poss1_HT['dist'] = None
+f = None
+p = 1
+for i, row in poss1_HT.iterrows():
+   
+    if f == None:
+        f = poss1_HT.at[i, 'InPossessionClubId']
+        poss1_HT.at[i, 'P'] = p
+    elif f == row['InPossessionClubId']:
+        poss1_HT.at[i, 'P'] = p
+    elif f != row['InPossessionClubId']:
+        f = poss1_HT.at[i, 'InPossessionClubId']
+        p += 1
+        poss1_HT.at[i, 'P'] = p
+    
+distance1_half = poss1_HT.groupby(['P', 'MatchId', 'InPossessionClubId', 'TeamAId', 'TeamBId'])['XmPossession'].agg({'first', 'last'})
+distance1_half['dist'] = distance1_half['last'] - distance1_half['first']
+distance1_half
+
+#HALFTIME DIST AVG 191....
+poss_HT = csv_dropping[['MatchId', 'Half', 'TeamAId', 'TeamBId', 'SeqNumber', 'EventCode', 'EventName', 'InPossessionClubId', 'XmPossession']]
+matches = [19111015, 19111023, 19111028,19111032,19111033,
+19111034,
+ 19111035,
+ 19111038,
+ 19111043,
+ 19111048,
+ 19111053,
+ 19111054,
+ 19111058,
+ 19111061,
+ 19111062,
+ 19111063,
+ 19111064,
+ 19111065,
+ 19111066,
+ 19111071,
+ 19111072,
+ 19111073,
+ 19111074,
+ 19111075,
+ 19111077,
+ 19111086,
+ 19111087,
+ 19111088,
+ 19111091,
+ 19111097,
+ 19111098,
+ 19111101,
+ 19111102,
+ 19111104,
+ 19111107,
+ 19111108,
+ 19111111,
+ 19111112,
+ 19111113,
+ 19111114,
+ 19111121,
+ 19111122,
+ 19111123,
+ 19111131,
+ 19111133,
+ 19111135,
+ 19111137,
+ 19111141,
+ 19111142,
+ 19111143,
+ 19111145,
+ 19111151,
+ 19111153,
+ 19111155,
+ 19111158,
+ 19111161,
+ 19111162,
+ 19111163,
+ 19111171,
+ 19111173,
+ 19111174,
+ 19111175,
+ 19111176,
+ 19111177,
+ 19111178,
+ 19111183,
+ 19111188,
+ 19111192,
+ 19111193,
+ 19111194,
+ 19111195,
+ 19111197,
+ 19111202,
+ 19111205,
+ 19111206,
+ 19111211,
+ 19111212,
+ 19111213,
+ 19111214,
+ 19111215,
+ 19111225,
+ 19111227,
+ 19111231,
+ 19111233,
+ 19111234,
+ 19111236,
+ 19111237,
+ 19111238,
+ 19111241,
+ 19111243,
+ 19111244,
+ 19111248,
+ 19111252,
+ 19111253,
+ 19111254,
+ 19111257,
+ 19111262,
+ 19111271,
+ 19111282,
+ 19111291]
+poss_HT = poss_HT[poss_HT['MatchId'].isin(matches)]
+poss_HT = poss_HT[~poss_HT['InPossessionClubId'].isnull()]
+poss_HT = poss_HT[poss_HT['Half'] == 1]
+
+poss_HT['P'] = None
+poss_HT['dist'] = None
+f = None
+p = 1
+for i, row in poss_HT.iterrows():
+   
+    if f == None:
+        f = poss_HT.at[i, 'InPossessionClubId']
+        poss_HT.at[i, 'P'] = p
+    elif f == row['InPossessionClubId']:
+        poss_HT.at[i, 'P'] = p
+    elif f != row['InPossessionClubId']:
+        f = poss_HT.at[i, 'InPossessionClubId']
+        p += 1
+        poss_HT.at[i, 'P'] = p
+    
+distance_half = poss_HT.groupby(['P', 'MatchId', 'InPossessionClubId', 'TeamAId', 'TeamBId'])['XmPossession'].agg({'first', 'last'})
+distance_half['dist'] = distance_half['last'] - distance_half['first']
+distance_half.head()
+
+poss_merged_half = pd.concat([distance_half,distance1_half], axis = 0)
+poss_merged_half
+
+dist1_HT = poss_merged_half.groupby(['MatchId','InPossessionClubId', 'TeamAId', 'TeamBId'])['dist'].agg(avg=('mean'))
+dist1_HT = dist1_HT.reset_index(drop=False)
+dist1_HT['TeamAdist_half'] = np.where((dist1_HT['TeamAId'] == dist1_HT['InPossessionClubId']), dist1_HT['avg'], 0)
+dist1_HT['TeamBdist_half'] = np.where((dist1_HT['TeamBId'] == dist1_HT['InPossessionClubId']), dist1_HT['avg'], 0)
+distance2_HT = dist1_HT.groupby(['MatchId'], as_index=True)['TeamAdist_half', 'TeamBdist_half'].max()
+#print(distance1.columns)
+distance2_HT = distance2_HT.drop_duplicates()
+distance2_HT = distance2_HT.reset_index(drop=False)
+distance2_HT.head()
+
+half2 = csv_dropping[['MatchId', 'SeqNumber', 'Half', 'Points', 'XmPhysical', 'TeamAId', 'TeamBId', 'InPossessionClubId', 'EventCode', 'Score', 'OppScore', 'TeamAScore', 'TeamBScore']]
+half2 = half2.dropna(axis=0, subset=['InPossessionClubId'])
+half2 = half2[half2['Half'] == 1]
+half2 = half2[(half2['Score'] >0) | (half2['OppScore'] >0)]
+half2 = half2[half2['EventCode'] == 'ENPO']
+half2 = half2[half2['TeamAId'] == half2['InPossessionClubId']]
+half2 = half2.groupby(['MatchId'], as_index=False).agg(ScoreA_halftime=('Score', 'last'), ScoreB_halftime=('OppScore', 'last'))
+#half2 = half2[half2['TeamBScore'] < half2['ScoreB']]
+pd.set_option('display.max_rows', 5000)
+half2.head()
+
+final = pd.merge(test_HT, half2)
+final = pd.merge(final, distance2_HT)
+final = pd.merge(final, duration, on='MatchId')
+final = pd.merge(final, target, on='MatchId')
+final.head()
+
+#ADDING VENUE AND WEATHER COLUMNS
+vewa = csv_merged[['MatchId','VenueId','WeatherConditionId']]
+vewa = vewa.drop_duplicates('MatchId')
+vewa = vewa[['MatchId','VenueId','WeatherConditionId']]
+vewa = vewa.sort_values('MatchId')
+final1 = pd.merge(final, vewa)
+final1.isnull().sum()
+
+test = csv_dropping.copy()
+ruckInf = test[(test['EventCode'] == 'RINS') | ((test['EventCode'] == 'PABD') & ((test['Qualifier1'] == 'Markers not square') | (test['Qualifier1'] == '2nd effort') | (test['Qualifier1'] == 'Flop') | (test['Qualifier1'] == 'Hand on ball') | (test['Qualifier1'] == 'Holding Down') | (test['Qualifier1'] == 'Lying in ruck') | (test['Qualifier1'] == 'Slow peel') | (test['Qualifier1'] == 'Working on ground')))]
+
+count = ruckInf[['SeasonId', 'MatchId']]
+amount = count.groupby(['SeasonId']).count().reset_index()
+amount
+
+plt.plot(['2019','2020','2021','2022'], amount['MatchId'])
+plt.ylabel('Ruck Infrinegment Count')
+plt.xlabel('Years')
+plt.title('Number of Ruck Infringements per Year')
+
+#games per year
+gY = ruckInf[['SeasonId', 'MatchId']]
+gY1 = gY.groupby(['SeasonId', 'MatchId']).size()
+gY1 = gY1.groupby(['SeasonId']).count().reset_index(name="count")
+
+#avg ruck per year
+avg = pd.concat([amount, gY1])
+#gY1['avg'] = 0
+#gY1['avg'] = amount['MatchId']/gY1['count']
+avg = avg.groupby(['SeasonId']).max()
+avg['avg'] = avg['MatchId']/avg['count']
+
+plt.plot(['2019', '2020', '2021', '2022'], avg['avg'])
+plt.ylabel('Ruck Infrinegment Average')
+plt.xlabel('Years')
+plt.title('Average Number of Ruck Infringements per Game')
+
+#show distribution of features
+sns.distplot(csv_dropping['XmPlayer'] , fit=norm);
+
+# Get the fitted parameters used by the function
+(mu, sigma) = norm.fit(csv_dropping['XmPlayer'])
+print( '\n mu = {:.2f} and sigma = {:.2f}\n'.format(mu, sigma))
+
+#Now plot the distribution
+plt.legend(['Normal dist. ($\mu=$ {:.2f} and $\sigma=$ {:.2f} )'.format(mu, sigma)],
+            loc='best')
+plt.ylabel('Frequency')
+plt.title('SalePrice distribution')
+
+#Get also the QQ-plot
+fig = plt.figure()
+res = stats.probplot(csv_dropping['XmPlayer'], plot=plt)
+plt.show()
+
+#show distribution of features
+sns.distplot(csv_dropping['YmPlayer'] , fit=norm);
+
+# Get the fitted parameters used by the function
+(mu, sigma) = norm.fit(csv_dropping['YmPlayer'])
+print( '\n mu = {:.2f} and sigma = {:.2f}\n'.format(mu, sigma))
+
+#Now plot the distribution
+plt.legend(['Normal dist. ($\mu=$ {:.2f} and $\sigma=$ {:.2f} )'.format(mu, sigma)],
+            loc='best')
+plt.ylabel('Frequency')
+plt.title('SalePrice distribution')
+
+#Get also the QQ-plot
+fig = plt.figure()
+res = stats.probplot(csv_dropping['YmPlayer'], plot=plt)
+plt.show()
+
+#Basic Rule change info for reference
+
+
+#2019:
+#Always a penalty
+
+
+#2020:
+#Replacing a penalty with a set restart anywhere on the field
+
+
+#2021:
+#Replacing a penalty with a set restart for any player deemed to be offside from the play of the ball
+
+
+
+#2022:
+#Any ruck infrigement or offside conceded inside the attacking team's 0-40 zone was penalised instead
+#of a set restart. Outside of the 0-40m zone remained a set restart
+
+
+tackles = test[(test['EventCode'] == 'REFT')]
+
+rins=ruckInf
+X=rins["XmPlayer"]
+Y=rins["YmPlayer"]
+plt.scatter(X, Y)
+
+rins19 = rins.query("SeasonId == 2019")
+rins20 = rins.query("SeasonId == 2020")
+rins21 = rins.query("SeasonId == 2021")
+rins22 = rins.query("SeasonId == 2022")
+
+X19=rins19["XmPlayer"]
+Y19=rins19["YmPlayer"]
+plt.scatter(X19, Y19)
+
+X20=rins20["XmPlayer"]
+Y20=rins20["YmPlayer"]
+plt.scatter(X20, Y20)
+
+X21=rins21["XmPlayer"]
+Y21=rins21["YmPlayer"]
+plt.scatter(X21, Y21)
+
+X22=rins22["XmPlayer"]
+Y22=rins22["YmPlayer"]
+plt.scatter(X22, Y22)
+
+#Calculate the average x and y coordinate on the field of ruck infringements for each year
+mx19=np.mean(X19)
+my19=np.mean(Y19)
+mx20=np.mean(X20)
+my20=np.mean(Y20)
+mx21=np.mean(X21)
+my21=np.mean(Y21)
+mx22=np.mean(X22)
+my22=np.mean(Y22)
+
+#scatterplot all ruck infringments, colour coding by year, superimposing a line seperating infringements inside
+#the attacking team's 0-40m zone (right), from those outside it (left)
+#also display the mean coordinate of ruck infringement for each year
+
+plt.figure(figsize=(20, 10))
+for index, row in rins.iterrows():
+    if (row['SeasonId']==2019):
+        plt.scatter(row['XmPlayer'],row['YmPlayer'],c='Red', s=30, alpha=0.8)
+    if (row['SeasonId']==2020):
+        plt.scatter(row['XmPlayer'],row['YmPlayer'],c='Blue',s=30, alpha=0.8)
+    if (row['SeasonId']==2021):
+        plt.scatter(row['XmPlayer'],row['YmPlayer'],c='Green',s=30, alpha=0.8)
+    if (row['SeasonId']==2022):
+        plt.scatter(row['XmPlayer'],row['YmPlayer'],c='Orange',s=30, alpha=0.8)
+
+plt.scatter(mx19, my19, c='Red', s=400, alpha=0.8)
+plt.scatter(mx20, my20, c='Blue', s=400, alpha=0.8)
+plt.scatter(mx21, my21, c='Green', s=400, alpha=0.8)
+plt.scatter(mx22, my22, c='Orange', s=400, alpha=0.8)
+plt.axvline(x=60,c='Purple')
+
+#Plot a 2x2 figure seperating the above data by year
+plt.figure(figsize=(20, 10))
+fig, axs = plt.subplots(2, 2, figsize=(20, 10))
+axs[0, 0].scatter(X19, Y19, c='Red')
+axs[0, 0].set_title('2019')
+axs[0, 0].axvline(x=60,c='Purple')
+axs[0, 1].scatter(X20, Y20, c='Blue')
+axs[0, 1].set_title('2020')
+axs[0, 1].axvline(x=60,c='Purple')
+axs[1, 0].scatter(X21, Y21, c='Green')
+axs[1, 0].set_title('2021')
+axs[1, 0].axvline(x=60,c='Purple')
+axs[1, 1].scatter(X22, Y22, c='Orange')
+axs[1, 1].set_title('2022')
+axs[1, 1].axvline(x=60,c='Purple')
+
+for ax in axs.flat:
+    ax.set(xlabel='Y position', ylabel='X position')
+
+# Hide x labels and tick labels for top plots and y ticks for right plots.
+for ax in axs.flat:
+    ax.label_outer()
+
+
+plt.hist2d(X, Y, bins=30)
+plt.colorbar()
+plt.title('Heatmap for all infringements')
+plt.xlabel("x position")
+plt.ylabel("y position")
+
+
+plt.show()
+
+#Create a 2x2 subplot of 2D histograms for each year with centre, left and right zones
+# for each 10m lengthwise section of the field
+fig, axs = plt.subplots(2, 2, figsize=(20, 10))
+
+axs[0, 0].hist2d(X19, Y19, bins=(np.arange(-10, 110.01, 10), np.arange(0, 70, 23.33)))
+axs[0, 0].set(xlim=(-10, 110), ylim=(0, 70))
+axs[0, 0].set_title('2019')
+axs[0, 1].hist2d(X20, Y20, bins=(np.arange(-10, 110.01, 10), np.arange(0, 70, 23.33)))
+axs[0, 1].set(xlim=(-10, 110), ylim=(0, 70))
+axs[0, 1].set_title('2020')
+axs[1, 0].hist2d(X21, Y21, bins=(np.arange(-10, 110.01, 10), np.arange(0, 70, 23.33)))
+axs[1, 0].set(xlim=(-10, 110), ylim=(0, 70))
+axs[1, 0].set_title('2021')
+axs[1, 1].hist2d(X22, Y22, bins=(np.arange(-10, 110.01, 10), np.arange(0, 70, 23.33)))
+axs[1, 1].set(xlim=(-10, 110), ylim=(0, 70))
+axs[1, 1].set_title('2022')
+
+
+plt.show()
+
+
+#Create a 2x2 subplots of regular histograms for each year's infringements
+#Do this for both density, and frequency
+plt.figure(figsize=(20, 10))
+fig, axs = plt.subplots(2, 2, figsize=(20, 10))
+axs[0, 0].hist(X19, rwidth=0.95, density=True)
+axs[0, 0].set_title('2019')
+axs[0, 0].set_ylim([0, 0.030])
+axs[0, 0].plot(kind = "kde")
+axs[0, 1].hist(X20, rwidth=0.95, density=True)
+axs[0, 1].set_title('2020')
+axs[0, 1].set_ylim([0, 0.030])
+axs[1, 0].hist(X21, rwidth=0.95, density=True)
+axs[1, 0].set_title('2021')
+axs[1, 0].set_ylim([0, 0.030])
+axs[1, 1].hist(X22, rwidth=0.95, density=True)
+axs[1, 1].set_title('2022')
+axs[1, 1].set_ylim([0, 0.030])
+
+
+plt.figure(figsize=(20, 10))
+fig, axs = plt.subplots(2, 2, figsize=(20, 10))
+axs[0, 0].hist(X19, rwidth=0.95, density=False)
+axs[0, 0].set_title('2019')
+axs[0, 0].set_ylim([0, 110])
+axs[0, 0].plot(kind = "kde")
+axs[0, 1].hist(X20, rwidth=0.95, density=False)
+axs[0, 1].set_title('2020')
+axs[0, 1].set_ylim([0, 110])
+axs[1, 0].hist(X21, rwidth=0.95, density=False)
+axs[1, 0].set_title('2021')
+axs[1, 0].set_ylim([0, 110])
+axs[1, 1].hist(X22, rwidth=0.95, density=False)
+axs[1, 1].set_title('2022')
+axs[1, 1].set_ylim([0, 110])
+
+
+#Numerical representation comparing total and relative number of ruck infringments inside 20m of goal,
+#and outside 60m between years
+# (the latter is inside the attacking team's 0-40m zone)
+rinsG20=rins.query("XmPlayer <= 20")
+rinsG20.groupby('SeasonId').count()
+
+tackG20=tackles.query("XmPossession >= 80")
+tackG20.groupby('SeasonId').count()
+
+rinsI40=rins.query("XmPlayer >= 60")
+rinsI40.groupby('SeasonId').count()
+
+tackI40=tackles.query("XmPossession <= 40")
+tackI40.groupby('SeasonId').count()
+
+rinsI40column=rinsI40.groupby('SeasonId').count()['MatchId']
+rinsG20column=rinsG20.groupby('SeasonId').count()['MatchId']
+rinsTotalColumn=rins.groupby('SeasonId').count()['MatchId']
+rinsI40percentage=rinsI40column/rinsTotalColumn*100
+rinsG20percentage=rinsG20column/rinsTotalColumn*100
+
+tackI40column=tackI40.groupby('SeasonId').count()['MatchId']
+tackG20column=tackG20.groupby('SeasonId').count()['MatchId']
+tackTotalColumn=tackles.groupby('SeasonId').count()['MatchId']
+tackI40percentage=tackI40column/tackTotalColumn*100
+tackG20percentage=tackG20column/tackTotalColumn*100
+
+RINSdf = pd.DataFrame()
+RINSdf['Total']=rinsTotalColumn
+RINSdf['Within 20m of goaline']=rinsG20column
+RINSdf['Within 20m %']=rinsG20percentage
+RINSdf['0-40m zone']=rinsI40column
+RINSdf['0-40m zone %']=rinsI40percentage
+
+TACKdf=pd.DataFrame()
+TACKdf['Total']=tackTotalColumn
+TACKdf['Within 20m of goaline']=tackG20column
+TACKdf['Within 20m %']=tackG20percentage
+TACKdf['0-40m zone']=tackI40column
+TACKdf['0-40m zone %']=tackI40percentage
+
+print("Ruck Infringements")
+print(RINSdf)
+print('\n')
+print("Tackles")
+print(TACKdf)
+
+R21=rins21.query("EventCode == 'RINS'")
+P21=rins21.query("EventCode == 'PABD'")
+
+R21X=R21['XmPossession']
+R21Y=R21['YmPossession']
+P21X=P21['XmPossession']
+P21Y=P21['YmPossession']
+
+
+plt.scatter(R21X, R21Y)
+plt.scatter(P21X, P21Y)
+
+possessions = test[(test['EventCode'] == 'CVMS') | (test['EventCode'] == 'CVOK') | (test['EventCode'] == 'ENPO') | (test['EventCode'] == 'STPO') | (test['Points']==4) | (test['Points']==2) | (test['Points']==1)]
+possessions = possessions.sort_values(['MatchId', 'Half', 'SeqNumber'], ascending=[True, True, True])
+
+position = possessions[['MatchId', 'SeqNumber', 'SeasonId', 'XmPossession', 'Points']]
+position = position[position['Points'] > 0]
+position = position.groupby(['MatchId', 'SeasonId', 'SeqNumber']).agg({'XmPossession':'first', 'Points':'first'})[['XmPossession','Points']].reset_index()
+
+posFinal = pd.DataFrame(columns = ['MatchId', 'SeqNumber', 'Year', 'Starting Position X', 'Starting Position Y', 'Possession Score'])
+for j, row2 in position.iterrows():
+    pos = possessions[(possessions['MatchId'] == row2['MatchId']) & (possessions['SeqNumber'] == row2['SeqNumber'])]
+    pos = pos[['YmPossession']]
+    posFinal = posFinal.append({'MatchId' : row2['MatchId'], 'SeqNumber' : row2['SeqNumber'], 'Year' : row2['SeasonId'], 'Starting Position X' : row2['XmPossession'], 'Starting Position Y' : pos.iloc[0]['YmPossession'], 
+    'Possession Score' : row2['Points']}, ignore_index = True)
+print(posFinal)
+
+y=posFinal['Starting Position X']
+x=posFinal['Starting Position Y']
+plt.scatter(y, x)
+
+pos19 = posFinal[posFinal['Year'] == 2019]
+pos20 = posFinal[posFinal['Year'] == 2020]
+pos21 = posFinal[posFinal['Year'] == 2021]
+pos22 = posFinal[posFinal['Year'] == 2022]
+
+y19=pos19['Starting Position Y']
+x19=pos19['Starting Position X']
+y20=pos20['Starting Position Y']
+x20=pos20['Starting Position X']
+y21=pos21['Starting Position Y']
+x21=pos21['Starting Position X']
+y22=pos22['Starting Position Y']
+x22=pos22['Starting Position X']
+
+plt.scatter(x19, y19)
+
+plt.scatter(x20, y20)
+
+plt.scatter(x21, y21)
+
+plt.scatter(x22, y22)
+
+#feature engineering 
+final1 = final1.drop('MatchId', axis=1)
+final1['Margin'] = final1['ScoreA_halftime'] - final1['ScoreB_halftime']
+#attendence 
+
+#label encoding
+label =  final1.copy()
+label['TeamAId'] = label['TeamAId'].astype(str)
+label['TeamBId'] = label['TeamBId'].astype(str)
+
+cols = ('TeamAId', 'TeamBId')
+# process columns, apply LabelEncoder to categorical features
+for c in cols:
+    lbl = LabelEncoder() 
+    lbl.fit(list(label[c].values)) 
+    label[c] = lbl.transform(list(label[c].values))
+label.head()
+
+# Look at the distribution of each individual variable including the dependent variable 'Withdraw'
+label.plot(lw=0, marker=".", subplots=True, layout=(-1, 4),
+          figsize=(15, 12), markersize=1)
+
+# Look at histogram of distributions of each variable
+label.hist(bins=25, figsize=(15, 8), layout=(-1, 5), edgecolor="black")
+plt.tight_layout()
+
+#correlation
+corr = label.corr()
+corr.style.background_gradient(cmap='coolwarm')
+
+sns.pairplot(label, hue="TeamAWins")
+
+X = final1.copy()
+X = X.rename({'TeamAWins': 'Results'}, axis=1)
+y = X['Results']
+X = X.drop('Results',1)
+X = X.drop('TeamAId',1)
+X = X.drop('TeamBId',1)
+X.head()
+
+#standardise data 
+scale= StandardScaler()
+ 
+# separate the independent and dependent variables
+X_data = X
+ 
+# standardization of dependent variables
+scaled_data = scale.fit_transform(X_data) 
+
+
+list_operation=[SVC(),LogisticRegression(),AdaBoostClassifier(),RandomForestClassifier(),DecisionTreeClassifier(),MLPClassifier()]
+name_operation=["SVC","LogisticRegression","AdaBoostClassifier","RandomForestClassifier","DecisionTreeClassifier","MLPClassifier"]
+for i in range(6):
+    Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data,y,test_size=0.7)
+    operation=list_operation[i]
+    operation.fit(Xtrain,Ytrain)
+    accuracy=operation.score(Xtest,Ytest)
+    f1=f1_score(Ytest, operation.predict(Xtest), labels=[1,0], pos_label=1)
+    print("%s accuracy is %.3f and f1_score is %.3f "%(name_operation[i],accuracy,f1))
+
+Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data, y , test_size=0.7)
+operation = RandomForestClassifier()
+operation.fit(Xtrain,Ytrain)
+scores=cross_val_score(estimator=operation,X=Xtrain,y=Ytrain,cv=10,n_jobs=1)
+print("CV Accuracy Scores: %s\n" % scores)
+
+Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data,y,test_size=0.7)
+score= []
+for i in range(150):
+    rfc = RandomForestClassifier(n_estimators= i+1)
+    rfc.fit(Xtrain,Ytrain)
+    f1=f1_score(Ytest, rfc.predict(Xtest), labels=[1,0], pos_label=1)
+    score.append(f1)
+plt.figure(figsize=(15,7))
+plt.plot(score)
+
+Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data,y,test_size=0.7)
+param_test1 = {"n_estimators":range(100,201,10)}
+gsearch1 = GridSearchCV(estimator=RandomForestClassifier(),param_grid=param_test1, scoring='f1',cv=10)
+gsearch1.fit(Xtrain,Ytrain)
+
+print(gsearch1.best_params_)
+print("best accuracy:%f" % gsearch1.best_score_)
+
+Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data,y,test_size=0.7)
+param_test2 = {"max_features":range(1,15,1)}
+gsearch2 = GridSearchCV(estimator=RandomForestClassifier(n_estimators=140),param_grid = param_test2,scoring='f1',cv=10)
+gsearch2.fit(Xtrain,Ytrain)
+
+print(gsearch2.best_params_)
+print("best accuracy:%f" % gsearch2.best_score_)
+
+Xtrain,Xtest,Ytrain,Ytest=train_test_split(X_data,y,test_size=0.7)
+test_model=RandomForestClassifier(n_estimators=120,max_features=6)
+test_model.fit(Xtrain,Ytrain)
+    
+predict=X['ResultPredicted']=test_model.predict(X_data)
+sns.countplot(x="ResultPredicted", data=X)
+
+test_error = mean_squared_error(np.ravel(final1['TeamAWins']), predict) 
+print("test set MSE:",test_error)
